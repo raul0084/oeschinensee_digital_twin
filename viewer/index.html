@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Oeschinensee digital twin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Cesium.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/cesium@1.147.0/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <script src="config.js"></script>
+  <script src="zonestats.js"></script>
+  <style>
+    html, body, #cesium { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    :root { --holo: #39d5ff; --text: #8fe3ff; --bright: #d8f6ff; --dim: #5fbfdf; --sel: #ff9a2e;
+            --mono: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .holo { border: 1px solid rgba(80, 210, 255, 0.45); border-radius: 4px; background: rgba(0, 10, 20, 0.78);
+            color: var(--text); font: var(--mono); letter-spacing: 0.04em; box-shadow: 0 0 12px rgba(60, 200, 255, 0.25); }
+
+    /* Menu */
+    #panel { position: absolute; top: 12px; left: 12px; padding: 6px 12px; width: 250px; }
+    #menuBtn { all: unset; cursor: pointer; display: block; color: var(--bright); letter-spacing: 0.15em; font-weight: bold; }
+    #menuBtn::after { content: " ▸"; color: var(--dim); }
+    #menuBtn[aria-expanded="true"]::after { content: " ▾"; }
+    #menu summary { cursor: pointer; color: var(--bright); text-transform: uppercase; letter-spacing: 0.12em;
+                    font-size: 11px; margin-top: 6px; list-style: none; }
+    #menu summary::before { content: "▸ "; color: var(--dim); }
+    #menu details[open] > summary::before { content: "▾ "; }
+    #menu .body { padding: 2px 0 4px 14px; }
+    #menu label { display: block; cursor: pointer; }
+    #menu input { accent-color: var(--holo); vertical-align: middle; }
+    #pick { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+    button.tool { font: inherit; color: var(--bright); background: rgba(57, 213, 255, 0.12); cursor: pointer;
+                  border: 1px solid rgba(80, 210, 255, 0.5); border-radius: 3px; padding: 1px 8px; margin: 3px 4px 0 0; }
+    button.tool.active { border-color: var(--sel); color: #ffc98a; }
+
+    /* Legend; colours match colourize() in scripts/terrain_change.py: red = lowered, violet-blue = raised */
+    .legend { font-size: 10px; line-height: 1.5; margin: 2px 0 6px; }
+    .legend .ramp { height: 10px; margin-top: 4px; border: 1px solid rgba(80, 210, 255, 0.3);
+                    background: linear-gradient(90deg, rgb(255,30,30), rgb(255,81,81) 42%, #000 42%, #000 58%,
+                                                rgb(111,91,255) 58%, rgb(60,40,255)); }
+    .legend .ticks, .legend .key { display: flex; justify-content: space-between; }
+    .legend .key { color: var(--bright); }
+    .legend p { margin: 4px 0 0; color: var(--dim); }
+
+    /* Result dialog, pinned to a point in the scene with an arrow */
+    #dialog { position: absolute; left: 0; top: 0; padding: 8px 12px 8px; width: 300px; pointer-events: auto;
+              border-color: rgba(255, 154, 46, 0.7); box-shadow: 0 0 14px rgba(255, 154, 46, 0.3); }
+    /* leader line from the dialog to the centre of what it describes */
+    #leader { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    #leader line { stroke: rgba(255, 154, 46, 0.85); stroke-width: 1.2; }
+    #leader circle { fill: #ff9a2e; stroke: #000; stroke-width: 1; }
+    #dialog h3 { margin: 0 0 4px; font-size: 12px; color: #ffc98a; letter-spacing: 0.12em; text-transform: uppercase; }
+    #dialog .close { all: unset; position: absolute; top: 4px; right: 8px; cursor: pointer; color: #ffc98a; }
+    #dialog .rows { font-size: 11px; line-height: 1.55; font-variant-numeric: tabular-nums; }
+    #dialog b { color: var(--bright); font-weight: normal; }
+    #dialog .note { color: var(--dim); font-size: 10px; margin-top: 4px; }
+    #downloads { margin-top: 4px; }
+    svg.profile { display: block; margin: 4px 0; font: 9px ui-monospace, Menlo, monospace; fill: var(--dim); }
+    svg.profile path { fill: none; }
+    svg.profile .axis { stroke: rgba(80, 210, 255, 0.35); }
+    svg.profile .now { stroke: var(--holo); stroke-width: 1.5; }
+    svg.profile .before { stroke: #ff8a8a; stroke-width: 1; stroke-dasharray: 3 2; }
+    .cesium-viewer-bottom { opacity: 0.5; }  /* credits stay visible (swisstopo attribution), just quieter */
+  </style>
+</head>
+<body>
+  <div id="cesium"></div>
+  <div id="panel" class="holo">
+    <button id="menuBtn" aria-expanded="false" aria-controls="menu">OESCHINENSEE</button>
+    <div id="menu" hidden>
+      <details open>
+        <summary>View</summary>
+        <div class="body">
+          <label><input type="checkbox" id="showContours" checked> contours</label>
+          <label><input type="checkbox" id="showGrid" checked> grid 250 m</label>
+          <label><input type="checkbox" id="showCloud"> LiDAR points</label>
+          <label><input type="checkbox" id="showChange"> terrain change <span id="changeYears"></span></label>
+          <div id="legend" class="legend" hidden>
+            <div class="scale"></div>
+            <p><span style="color:#ff5151">Red</span>: surface went down (rockfall source, erosion, ice loss).
+               <span style="color:#7d6bff">Blue</span>: surface went up (debris, deposits). Black gap: change
+               smaller than ±<span class="lod"></span> m, which is within the noise, so it is hidden.</p>
+            <p id="changeNote"></p>
+          </div>
+        </div>
+      </details>
+      <details>
+        <summary>Analysis</summary>
+        <div class="body">
+          <button class="tool" id="zoneBtn" title="Outline an area on the terrain to measure how it changed; finish with a double-click or Enter. Esc cancels.">measure change</button>
+          <button class="tool" id="profileBtn" title="Click points along a line; finish with a double-click or Enter. Esc cancels.">elevation profile</button>
+        </div>
+      </details>
+    </div>
+    <div id="pick">click a dot for its name</div>
+  </div>
+  <svg id="leader" hidden><line></line><circle r="4"></circle></svg>
+  <div id="dialog" class="holo" hidden>
+    <button class="close" aria-label="close">×</button>
+    <h3></h3>
+    <div class="content"></div>
+    <div id="downloads"></div>
+  </div>
+  <script>
+    // ion asset ids (see ion_assets.json). Token comes from config.js (gitignored, read-only token).
+    const TERRAIN_ID = 6184765;
+    const POINT_CLOUD_ID = 6184775;
+    // Geoid undulation here: LN02 heights + ~50 m = ellipsoidal (measured by aligning the LiDAR cloud).
+    // shortcut: one constant for the whole AOI (varies < 1 m over 5 km); upgrade with swisstopo's geoid model.
+    const GEOID_N = 50;
+    const HOLO = Cesium.Color.fromCssColorString("#39d5ff");
+    const SELECT = Cesium.Color.fromCssColorString("#ff9a2e");
+    const $ = (id) => document.getElementById(id);
+    Cesium.Ion.defaultAccessToken = ION_TOKEN;
+
+    // Sampling heights must wait for this: until it resolves, scene.terrainProvider is a flat 0 m placeholder
+    const terrainReady = Cesium.CesiumTerrainProvider.fromIonAssetId(TERRAIN_ID);
+    const viewer = new Cesium.Viewer("cesium", {
+      terrain: new Cesium.Terrain(terrainReady),
+      baseLayer: false,  // no photo: the terrain is drawn only by the contour shader
+      baseLayerPicker: false, geocoder: false, timeline: false, animation: false,
+      homeButton: false, sceneModePicker: false, navigationHelpButton: false, fullscreenButton: false,
+      selectionIndicator: false, infoBox: false,  // no green brackets / info box; we highlight in orange
+      showRenderLoopErrors: false,
+    });
+    // shortcut: Cesium's terrain gap-filling (TerrainFillMesh) sometimes reads a neighbour tile with no
+    // mesh at the edge of our block-only terrain and throws "reading 'northIndicesWestToEast'". The frame
+    // is lost but nothing else; restart the render loop instead of freezing. Upgrade: re-upload the
+    // terrain with baseTerrainId 1 (blocked by the ion quota) so there is no data edge.
+    let renderErrors = 0;
+    viewer.scene.renderError.addEventListener((_, err) => {
+      if (++renderErrors % 50 === 1) console.warn(`render error #${renderErrors}, continuing:`, err);
+      requestAnimationFrame(() => (viewer.useDefaultRenderLoop = true));
+    });
+    viewer.creditDisplay.addStaticCredit(new Cesium.Credit('© <a href="https://www.swisstopo.admin.ch/">swisstopo</a>'));
+
+    // --- The void: nothing but black around the block ---------------------------------------------
+    const scene = viewer.scene, globe = scene.globe;
+    scene.skyBox.show = false;
+    scene.skyAtmosphere.show = false;
+    scene.sun.show = false;
+    scene.moon.show = false;
+    scene.fog.enabled = false;
+    scene.backgroundColor = Cesium.Color.BLACK;
+    globe.showGroundAtmosphere = false;
+    globe.enableLighting = false;
+    globe.baseColor = Cesium.Color.BLACK;
+    globe.depthTestAgainstTerrain = true;
+
+    // --- Contours: thin line every 10 m, bright line every 50 m, faded when lines get too dense -----
+    const contours = new Cesium.Material({
+      fabric: {
+        type: "HoloContours",
+        uniforms: { color: HOLO, minor: 10.0, major: 50.0, strength: 1.0 },
+        source: `
+          czm_material czm_getMaterial(czm_materialInput materialInput) {
+            czm_material m = czm_getDefaultMaterial(materialInput);
+            float h = materialInput.height;
+            float fw = max(fwidth(h), 1e-4);  // metres of height per pixel: keeps lines ~1 px wide
+            float dMinor = abs(mod(h + 0.5 * minor, minor) - 0.5 * minor);
+            float dMajor = abs(mod(h + 0.5 * major, major) - 0.5 * major);
+            float lMinor = (1.0 - smoothstep(0.0, fw, dMinor)) * (1.0 - smoothstep(0.15 * minor, 0.4 * minor, fw));
+            float lMajor = (1.0 - smoothstep(0.0, 1.6 * fw, dMajor)) * (1.0 - smoothstep(0.15 * major, 0.4 * major, fw));
+            float line = max(0.45 * lMinor, lMajor) * strength;
+            // The globe shader alpha-blends diffuse/alpha over the imagery (emission is ignored),
+            // so lines are opaque colour and the gaps show the base colour or the change layer.
+            m.diffuse = color.rgb;
+            m.alpha = line;
+            return m;
+          }`,
+      },
+    });
+    globe.material = contours;
+
+    // Mouse: left-drag pans, right-drag tilts/rotates the view, wheel zooms
+    const ctl = scene.screenSpaceCameraController;
+    ctl.rotateEventTypes = Cesium.CameraEventType.LEFT_DRAG;  // "rotate" in 3D = drag the globe = pan
+    ctl.tiltEventTypes = [Cesium.CameraEventType.RIGHT_DRAG, Cesium.CameraEventType.MIDDLE_DRAG];
+    ctl.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
+    ctl.minimumZoomDistance = 30;
+    ctl.maximumZoomDistance = 20000;  // can't fly off and lose the block
+    viewer.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    // Glow
+    const bloom = scene.postProcessStages.bloom;
+    bloom.enabled = true;
+    Object.assign(bloom.uniforms, { glowOnly: false, contrast: 128, brightness: -0.3, delta: 1.0, sigma: 3.0, stepSize: 1.0 });
+
+    // Whole block in view, from the south-west
+    viewer.camera.setView({
+      destination: Cesium.Cartesian3.fromDegrees(7.693, 46.468, 5600),
+      orientation: { heading: Cesium.Math.toRadians(35), pitch: Cesium.Math.toRadians(-32), roll: 0 },
+    });
+
+    const getJson = (name) => fetch(`data/${name}.geojson`).then((r) => r.json());
+    const ring = (coords) => Cesium.Cartesian3.fromDegreesArray(coords.flat());
+    const ground = (positions, color, width) => viewer.entities.add({
+      polyline: { positions, width, clampToGround: true, material: color },
+    });
+    const toLonLat = (p) => {
+      const c = Cesium.Cartographic.fromCartesian(p);
+      return [Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude)];
+    };
+    const fmt = (v, d = 0) => v.toLocaleString("en", { maximumFractionDigits: d, minimumFractionDigits: d });
+    const signed = (v, d = 0) => (v > 0 ? "+" : "") + fmt(v, d);
+
+    // --- Block as a printed model: a base plate, opaque walls rising from it to the terrain edge, and the
+    // terrain's contour lines carried round the walls at the same heights, so they meet the surface's.
+    // The walls also hide what is left of the drop-off at the edge of our block-only terrain asset.
+    getJson("aoi").then(async (aoi) => {
+      const clip = aoi.features.find((f) => f.properties.role === "clip").geometry.coordinates[0].slice(0, -1);
+      globe.clippingPolygons = new Cesium.ClippingPolygonCollection({
+        polygons: [new Cesium.ClippingPolygon({ positions: ring(clip) })],
+        inverse: true,  // clip everything OUTSIDE the polygon
+      });
+      const edge = aoi.features.find((f) => f.properties.role === "frame").geometry.coordinates.map(
+        ([lon, lat]) => Cesium.Cartographic.fromDegrees(lon, lat));
+      const lons = clip.map((p) => p[0]), lats = clip.map((p) => p[1]);
+      // coarse interior grid to find the lowest point, kept ~150 m off the edge (where the terrain drops to 0 m)
+      const inner = [], [w, e, sth, n] = [Math.min(...lons), Math.max(...lons), Math.min(...lats), Math.max(...lats)];
+      const mx = (e - w) * 0.03, my = (n - sth) * 0.04;
+      for (let i = 0; i <= 16; i++) for (let j = 0; j <= 12; j++) inner.push(Cesium.Cartographic.fromDegrees(
+        w + mx + (e - w - 2 * mx) * i / 16, sth + my + (n - sth - 2 * my) * j / 12));
+      const tp = await terrainReady;
+      await Promise.all([Cesium.sampleTerrainMostDetailed(tp, edge), Cesium.sampleTerrainMostDetailed(tp, inner)]);
+      const lowest = Math.min(...edge.map((c) => c.height), ...inner.map((c) => c.height));
+      const floor = Math.floor((lowest - 40) / 10) * 10, base = floor - 60;  // plate 60 m thick
+      const at = (c, h) => Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, h);
+      const dark = new Cesium.Color(0.0, 0.045, 0.08, 1.0);
+
+      viewer.entities.add({ wall: { positions: edge.map((c) => at(c, 0)), maximumHeights: edge.map((c) => c.height),
+                                    minimumHeights: edge.map(() => floor), material: dark } });
+      viewer.entities.add({ polygon: { hierarchy: edge.map((c) => at(c, floor)), height: floor, extrudedHeight: base,
+                                       material: new Cesium.Color(0.0, 0.09, 0.14, 1.0) } });
+
+      const mid = Cesium.Cartographic.fromDegrees((Math.min(...lons) + Math.max(...lons)) / 2, (Math.min(...lats) + Math.max(...lats)) / 2);
+      // Cut away all terrain below the floor (the drop-off of our block-only terrain asset). A horizontal
+      // plane in the local east-north-up frame at the block centre; Cesium keeps the side the normal points to.
+      // A flat plane rises ~0.7 m above the floor height at the corners (Earth curvature); harmless, the floor
+      // is 40 m under the lowest real terrain.
+      const centre = Cesium.Cartesian3.fromRadians(mid.longitude, mid.latitude, 0);
+      globe.clippingPlanes = new Cesium.ClippingPlaneCollection({
+        modelMatrix: Cesium.Transforms.eastNorthUpToFixedFrame(centre),
+        planes: [new Cesium.ClippingPlane(new Cesium.Cartesian3(0, 0, 1), -floor)],
+        edgeWidth: 0,
+      });
+
+      // Edges: terrain rim, floor line, plate bottom, four corners
+      const lines = scene.primitives.add(new Cesium.PolylineCollection());
+      const glow = (a) => Cesium.Material.fromType("Color", { color: HOLO.withAlpha(a) });
+      const add = (positions, width, a) => lines.add({ positions, width, material: glow(a) });
+      // a hair outside the wall so the lines are not hidden in it
+      const out = (lon, lat, h) => {
+        const p = Cesium.Cartesian3.fromRadians(lon, lat, h), c = Cesium.Cartesian3.fromRadians(mid.longitude, mid.latitude, h);
+        const d = Cesium.Cartesian3.normalize(Cesium.Cartesian3.subtract(p, c, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+        return Cesium.Cartesian3.add(p, Cesium.Cartesian3.multiplyByScalar(d, 1.5, d), p);
+      };
+      add(edge.map((c) => out(c.longitude, c.latitude, c.height + 0.5)), 2, 1);
+      add(edge.map((c) => out(c.longitude, c.latitude, floor)), 1.5, 0.9);
+      add(edge.map((c) => out(c.longitude, c.latitude, base)), 1, 0.5);
+      const score = [(c) => -(c.longitude + c.latitude), (c) => c.longitude - c.latitude,
+                     (c) => c.longitude + c.latitude, (c) => c.latitude - c.longitude];
+      for (const f of score) {  // corners of the (slightly rotated) LV95 rectangle: extremes of lon±lat
+        const c = edge.reduce((best, x) => (f(x) > f(best) ? x : best));
+        add([out(c.longitude, c.latitude, base), out(c.longitude, c.latitude, c.height)], 1.5, 0.8);
+      }
+
+      // Wall contours: for each level, the runs of the rim that are above it, cut at the crossings
+      const MINOR = 10, MAJOR = 50;  // same as the terrain shader
+      const top = Math.max(...edge.map((c) => c.height));
+      const hs = edge.map((c) => c.height);
+      const lerp = (f, L) => {  // fractional rim index -> position at height L
+        const i = Math.floor(f), t = f - i, a = edge[i], b = edge[Math.min(i + 1, edge.length - 1)];
+        return out(a.longitude + t * (b.longitude - a.longitude), a.latitude + t * (b.latitude - a.latitude), L);
+      };
+      for (let L = Math.ceil(floor / MINOR) * MINOR + MINOR; L < top; L += MINOR) {
+        const major = L % MAJOR === 0;
+        for (const run of levelRuns(hs, L)) add(run.map((f) => lerp(f, L)), major ? 1.4 : 1, major ? 0.85 : 0.35);
+      }
+      console.info(`box: rim ${fmt(Math.min(...hs) - GEOID_N)}–${fmt(top - GEOID_N)} m, floor ${fmt(floor - GEOID_N)} m a.s.l.`);
+    }).catch((err) => { console.error("box failed:", err); $("pick").textContent = `box: ${err.message ?? err}`; });
+
+    // --- Grid ---------------------------------------------------------------------------------------
+    const gridLines = [];
+    getJson("grid").then((g) => g.features.forEach((f) =>
+      gridLines.push(ground(ring(f.geometry.coordinates), HOLO.withAlpha(0.22), 1))));
+
+    // --- Names: a dot per item, label shown only after a click --------------------------------------
+    const byName = {};
+    getJson("names").then((n) => n.features.forEach((f) => {
+      const [lon, lat] = f.geometry.coordinates;
+      byName[f.properties.name] = viewer.entities.add({
+        position: Cesium.Cartesian3.fromDegrees(lon, lat, 4),
+        point: { pixelSize: 6, color: HOLO.withAlpha(0.9), outlineColor: Cesium.Color.WHITE.withAlpha(0.6),
+                 outlineWidth: 1, heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND },
+        label: { text: f.properties.name, show: false, font: "13px ui-monospace, Menlo, monospace",
+                 fillColor: Cesium.Color.fromCssColorString("#d8f6ff"), showBackground: true,
+                 backgroundColor: Cesium.Color.fromCssColorString("#001420").withAlpha(0.75),
+                 heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND,
+                 verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -10),
+                 disableDepthTestDistance: Number.POSITIVE_INFINITY },
+        properties: { kind: f.properties.kind },
+      });
+    })).then(() => getJson("lake")).then((lake) => {
+      // --- Lake: translucent glowing surface + bright shoreline; clicking it toggles its name ------
+      const geom = lake.features[0].geometry;
+      const polys = geom.type === "MultiPolygon" ? geom.coordinates : [geom.coordinates];
+      for (const [outer, ...holes] of polys) {
+        const hierarchy = new Cesium.PolygonHierarchy(ring(outer), holes.map((h) => new Cesium.PolygonHierarchy(ring(h))));
+        const fill = viewer.entities.add({
+          polygon: { hierarchy, material: HOLO.withAlpha(0.16), classificationType: Cesium.ClassificationType.TERRAIN },
+        });
+        const shore = ground(ring(outer), HOLO.withAlpha(0.95), 2);
+        fill.labelTarget = shore.labelTarget = byName["Oeschinensee"];
+      }
+    });
+
+    // --- LiDAR point cloud, lifted by the geoid undulation ---------------------------------------------
+    // LAS heights are LN02 (orthometric) but ion reads them as ellipsoidal, so the cloud sits GEOID_N too low.
+    // Loaded on first use only: it is off at start and every tile streamed counts against the ion quota.
+    let cloud, cloudLoading;
+    function loadCloud() {
+      cloudLoading ??= Cesium.Cesium3DTileset.fromIonAssetId(POINT_CLOUD_ID).then((t) => {
+        cloud = scene.primitives.add(t);
+        // swissSURFACE3D class 7 = "low point" (noise, often metres below ground); 18 = high noise
+        cloud.style = new Cesium.Cesium3DTileStyle({
+          show: "${Classification} !== 7 && ${Classification} !== 18",
+          color: 'color("#39d5ff", 0.55)', pointSize: 1.5 });
+        cloud.show = $("showCloud").checked;
+        const c = Cesium.Cartographic.fromCartesian(cloud.boundingSphere.center);
+        const lift = Cesium.Cartesian3.subtract(Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, GEOID_N),
+          Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, 0), new Cesium.Cartesian3());
+        cloud.modelMatrix = Cesium.Matrix4.fromTranslation(lift);
+      }).catch((e) => { $("pick").textContent = "point cloud failed: " + e; });
+      return cloudLoading;
+    }
+
+    // --- Terrain change (scripts/terrain_change.py) --------------------------------------------------
+    let change, changeMeta, changeGrid;
+    async function loadChange() {
+      const r = await fetch("data/dod.json", { cache: "no-cache" });
+      if (!r.ok) throw new Error(`data/dod.json: HTTP ${r.status}`);
+      changeMeta = await r.json();
+      const m = changeMeta;
+      // note: imageryLayers.add() returns nothing, so keep our own reference to the layer
+      change = Cesium.ImageryLayer.fromProviderAsync(Cesium.SingleTileImageryProvider.fromUrl("data/dod.png",
+        { rectangle: Cesium.Rectangle.fromDegrees(m.west, m.south, m.east, m.north) }));
+      change.show = false;  // off until the toggle; a later failure must not leave it stuck on
+      viewer.imageryLayers.add(change);
+      const g = await fetch("data/dod.bin.gz", { cache: "no-cache" });
+      if (!g.ok) throw new Error(`data/dod.bin.gz: HTTP ${g.status}`);
+      let bytes = await g.arrayBuffer();
+      // Some dev servers send .gz with Content-Encoding: gzip, so the browser has already unzipped it.
+      const head = new Uint8Array(bytes, 0, 2);
+      if (head[0] === 0x1f && head[1] === 0x8b) {
+        bytes = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+      }
+      if (bytes.byteLength !== m.width * m.height * 2) {
+        throw new Error(`dod.bin.gz has ${bytes.byteLength} bytes, dod.json expects ${m.width * m.height * 2}: re-run terrain_change.py`);
+      }
+      changeGrid = new Int16Array(bytes);
+      $("changeYears").textContent = `${m.years[0]}→${m.years[1]}`;
+      $("legend").querySelector(".scale").innerHTML = legendScale();
+      document.querySelectorAll("#legend .lod").forEach((e) => (e.textContent = m.lod_m));
+      $("changeNote").textContent =
+        `Whole block: lowered ${fmt(m.loss_m3 / 1e6, 2)} M m³, raised ${fmt(m.gain_m3 / 1e6, 2)} M m³ ` +
+        `(noise on stable ground ${m.stable_nmad_m} m).`;
+    }
+    const legendScale = () =>
+      `<div class="key"><span>◀ lowered</span><span>raised ▶</span></div><div class="ramp"></div>` +
+      `<div class="ticks"><span>≤−${changeMeta.clip_m}</span><span>−${changeMeta.lod_m}</span><span>no change</span>` +
+      `<span>+${changeMeta.lod_m}</span><span>≥+${changeMeta.clip_m} m</span></div>`;
+
+    // The change map cropped to a polygon: dod.png drawn onto a canvas through a clip path, so the
+    // colours are exactly the script's and nothing shows outside the zone.
+    let dodImage;
+    async function changeLayerFor(lonlat) {
+      const m = changeMeta;
+      if (!dodImage) { dodImage = new Image(); dodImage.src = "data/dod.png"; await dodImage.decode(); }
+      const dLon = (m.east - m.west) / m.width, dLat = (m.north - m.south) / m.height;
+      const cols = lonlat.map((p) => (p[0] - m.west) / dLon), rows = lonlat.map((p) => (m.north - p[1]) / dLat);
+      const c0 = Math.max(0, Math.floor(Math.min(...cols))), c1 = Math.min(m.width, Math.ceil(Math.max(...cols)));
+      const r0 = Math.max(0, Math.floor(Math.min(...rows))), r1 = Math.min(m.height, Math.ceil(Math.max(...rows)));
+      if (c1 <= c0 || r1 <= r0) return undefined;
+      const canvas = document.createElement("canvas");
+      canvas.width = c1 - c0; canvas.height = r1 - r0;
+      const ctx = canvas.getContext("2d");
+      ctx.beginPath();
+      cols.forEach((c, i) => ctx.lineTo(c - c0, rows[i] - r0));
+      ctx.closePath();
+      ctx.clip();
+      ctx.drawImage(dodImage, c0, r0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+      const layer = Cesium.ImageryLayer.fromProviderAsync(Cesium.SingleTileImageryProvider.fromUrl(canvas.toDataURL("image/png"), {
+        rectangle: Cesium.Rectangle.fromDegrees(m.west + c0 * dLon, m.north - r1 * dLat, m.west + c1 * dLon, m.north - r0 * dLat),
+      }));
+      viewer.imageryLayers.add(layer);  // add() returns nothing
+      return layer;
+    }
+
+    function changeAt(lon, lat) {  // metres of change at a lon/lat in degrees, or NaN
+      const m = changeMeta;
+      if (!changeGrid) return NaN;
+      const col = Math.floor((lon - m.west) / (m.east - m.west) * m.width);
+      const row = Math.floor((m.north - lat) / (m.north - m.south) * m.height);
+      if (col < 0 || row < 0 || col >= m.width || row >= m.height) return NaN;
+      const v = changeGrid[row * m.width + col];
+      return v === m.nodata ? NaN : v * m.scale;
+    }
+    const changeReady = loadChange().catch((err) => {
+      console.error("terrain change failed to load:", err);
+      if (change) viewer.imageryLayers.remove(change, true);
+      change = undefined;
+      changeGrid = undefined;
+      $("showChange").disabled = true;
+      $("changeYears").textContent = "(failed, see status)";
+      $("pick").textContent = `terrain change: ${err.message ?? err}`;
+    });
+
+    // --- Result dialog pinned to a point in the scene ---------------------------------------------------
+    // anchor: the point the leader line points at; extent: the shape's vertices, which the dialog must not cover
+    const dialog = $("dialog"), leader = $("leader");
+    let dialogAnchor, dialogExtent = [], onDialogClose;
+    // dl: optional { label, file: () => [filename, text, mime] }, or a list of them, one download button each
+    function openDialog(anchor, title, html, onClose, extent = [], dl) {
+      dialogAnchor = anchor;
+      dialogExtent = extent;
+      onDialogClose = onClose;
+      dialog.querySelector("h3").textContent = title;
+      dialog.querySelector(".content").innerHTML = html;
+      const box = $("downloads");
+      box.replaceChildren();
+      for (const d of dl ? [].concat(dl) : []) {
+        const btn = document.createElement("button");
+        btn.className = "tool";
+        btn.textContent = `⤓ ${d.label}`;
+        btn.onclick = () => {
+          const [name, text, type] = d.file();
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(new Blob([text], { type }));
+          a.download = name;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        };
+        box.append(btn);
+      }
+      dialog.hidden = leader.hidden = false;
+    }
+    const stamp = () => new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "");  // 2026-11-20_1342
+    function closeDialog() {
+      dialog.hidden = leader.hidden = true;
+      dialogAnchor = undefined;
+      dialogExtent = [];
+      onDialogClose?.();
+      onDialogClose = undefined;
+    }
+    dialog.querySelector(".close").addEventListener("click", closeDialog);
+
+    // Place the dialog next to the shape's on-screen box (above, else right, left, below), never on it
+    function placeDialog(centre, box, w, h, vw, vh, gap = 28, margin = 8) {
+      const options = [
+        [centre.x - w / 2, box.minY - gap - h],  // above
+        [box.maxX + gap, centre.y - h / 2],      // right
+        [box.minX - gap - w, centre.y - h / 2],  // left
+        [centre.x - w / 2, box.maxY + gap],      // below
+      ];
+      const fits = ([x, y]) => x >= margin && y >= margin && x + w <= vw - margin && y + h <= vh - margin;
+      const clampX = (x) => Math.min(Math.max(x, margin), vw - w - margin);
+      const clampY = (y) => Math.min(Math.max(y, margin), vh - h - margin);
+      // the shape's own side must be clear; only the other axis may be nudged to stay on screen
+      const free = options.map(([x, y], i) => (i === 0 || i === 3 ? [clampX(x), y] : [x, clampY(y)]));
+      const [x, y] = free.find(fits) ?? [clampX(options[0][0]), clampY(options[0][1])];  // shape fills the screen
+      return { x, y };
+    }
+
+    scene.postRender.addEventListener(() => {  // follow the shape as the camera moves
+      if (!dialogAnchor) return;
+      const toXY = (p) => Cesium.SceneTransforms.worldToWindowCoordinates(scene, p);
+      const centre = toXY(dialogAnchor);  // undefined when the point is behind the camera
+      dialog.style.visibility = leader.style.visibility = centre ? "visible" : "hidden";
+      if (!centre) return;
+      const pts = [centre, ...dialogExtent.map(toXY).filter(Boolean)];
+      const box = { minX: Math.min(...pts.map((p) => p.x)), maxX: Math.max(...pts.map((p) => p.x)),
+                    minY: Math.min(...pts.map((p) => p.y)), maxY: Math.max(...pts.map((p) => p.y)) };
+      const w = dialog.offsetWidth, h = dialog.offsetHeight;
+      const { x, y } = placeDialog(centre, box, w, h, viewer.canvas.clientWidth, viewer.canvas.clientHeight);
+      dialog.style.left = `${x}px`;
+      dialog.style.top = `${y}px`;
+      // leader: from the dialog's nearest edge point to the centre
+      const lx = Math.min(Math.max(centre.x, x), x + w), ly = Math.min(Math.max(centre.y, y), y + h);
+      const line = leader.querySelector("line"), dot = leader.querySelector("circle");
+      line.setAttribute("x1", lx); line.setAttribute("y1", ly);
+      line.setAttribute("x2", centre.x); line.setAttribute("y2", centre.y);
+      dot.setAttribute("cx", centre.x); dot.setAttribute("cy", centre.y);
+    });
+
+    // --- Drawing tools: zone (polygon) and elevation profile (line) -------------------------------------
+    const TOOLS = {
+      zone: { btn: $("zoneBtn"), min: 3, label: "measure change", finish: finishZone },
+      profile: { btn: $("profileBtn"), min: 2, label: "elevation profile", finish: finishProfile },
+    };
+    let tool;                 // the tool being drawn: { kind, pts, entities }
+    let resultEntities = [];  // shapes of the finished result shown in the dialog
+    let resultLayer;          // the zone's cropped terrain change layer
+
+    function clearResult() {
+      resultEntities.forEach((e) => viewer.entities.remove(e));
+      resultEntities = [];
+      if (resultLayer) viewer.imageryLayers.remove(resultLayer, true);
+      resultLayer = undefined;
+    }
+    function startTool(kind) {
+      cancelTool();
+      closeDialog();
+      const t = tool = { kind, pts: [], entities: [] };
+      TOOLS[kind].btn.classList.add("active");
+      TOOLS[kind].btn.textContent = "finish";
+      const closed = () => (t.pts.length ? [...t.pts, t.pts[0]] : []);
+      if (kind === "zone") {
+        t.entities.push(viewer.entities.add({ polygon: {
+          hierarchy: new Cesium.CallbackProperty(() => (t.pts.length >= 3 ? new Cesium.PolygonHierarchy(t.pts) : undefined), false),
+          material: SELECT.withAlpha(0.22), classificationType: Cesium.ClassificationType.TERRAIN } }));
+      }
+      t.entities.push(viewer.entities.add({ polyline: {
+        positions: new Cesium.CallbackProperty(kind === "zone" ? closed : () => t.pts, false),
+        width: 2.5, clampToGround: true, material: SELECT } }));
+      $("pick").textContent = "click points on the terrain · double-click or Enter to finish · Esc cancels";
+    }
+    function endTool() {  // stop drawing; keep the shapes as the result
+      const t = tool;
+      tool = undefined;
+      TOOLS[t.kind].btn.classList.remove("active");
+      TOOLS[t.kind].btn.textContent = TOOLS[t.kind].label;
+      return t;
+    }
+    function cancelTool() {
+      if (!tool) return;
+      endTool().entities.forEach((e) => viewer.entities.remove(e));
+      $("pick").textContent = "";
+    }
+    function finishTool() {
+      if (!tool) return;
+      if (tool.pts.length < TOOLS[tool.kind].min) return cancelTool();
+      const t = endTool();
+      clearResult();
+      resultEntities = t.entities;
+      $("pick").textContent = "";
+      TOOLS[t.kind].finish(t.pts);
+    }
+    Object.entries(TOOLS).forEach(([kind, def]) =>
+      def.btn.addEventListener("click", () => (tool?.kind === kind ? finishTool() : startTool(kind))));
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") finishTool();
+      if (e.key === "Escape") { cancelTool(); closeDialog(); }
+    });
+
+    // The shape's on-screen footprint: its corners alone miss ridges and upper slopes inside it, which
+    // project higher on screen in oblique views. Sample edges and interior at their terrain height.
+    function footprint(lonlat, n = 14) {
+      const out = [];
+      const at = (lon, lat) => {
+        const c = Cesium.Cartographic.fromDegrees(lon, lat);
+        out.push(Cesium.Cartesian3.fromDegrees(lon, lat, globe.getHeight(c) ?? 0));
+      };
+      lonlat.forEach(([x0, y0], i) => {
+        const [x1, y1] = lonlat[(i + 1) % lonlat.length];
+        for (let k = 0; k < n; k++) at(x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n);
+      });
+      const xs = lonlat.map((p) => p[0]), ys = lonlat.map((p) => p[1]);
+      const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+      for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) {
+        const x = x0 + (x1 - x0) * i / n, y = y0 + (y1 - y0) * j / n;
+        if (insideRing(x, y, lonlat)) at(x, y);
+      }
+      return out;
+    }
+
+    async function finishZone(pts) {
+      await changeReady;
+      const lonlat = pts.map(toLonLat);
+      const extent = footprint(lonlat);
+      // anchor: vertex centroid, at the terrain height there
+      const lon = lonlat.reduce((s, p) => s + p[0], 0) / lonlat.length, lat = lonlat.reduce((s, p) => s + p[1], 0) / lonlat.length;
+      const anchor = Cesium.Cartesian3.fromDegrees(lon, lat, globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat)) ?? 0);
+      const done = () => clearResult();
+      if (!changeGrid) return openDialog(anchor, "Measure change", "terrain change data not loaded (run terrain_change.py)", done, extent);
+      const st = zoneStats(changeGrid, changeMeta, lonlat), m = changeMeta;
+      if (!st.area_m2) return openDialog(anchor, "Measure change", "no terrain change data here (outside the block or on the lake)", done, extent);
+      const layer = await changeLayerFor(lonlat);
+      if (!resultEntities.length) { if (layer) viewer.imageryLayers.remove(layer, true); return; }  // closed meanwhile
+      resultLayer = layer;
+      openDialog(anchor, `Change ${m.years[0]}→${m.years[1]}`,
+        `<div class="legend">${legendScale()}</div><div class="rows">` +
+        `area <b>${fmt(st.area_m2 / 1e6, 3)} km²</b>${st.noData_m2 ? ` (+${fmt(st.noData_m2)} m² lake/no data)` : ""}<br>` +
+        `mean Δh <b>${signed(st.mean_dh_m, 2)} m</b> · range ${signed(st.min_dh_m, 1)} to ${signed(st.max_dh_m, 1)} m<br>` +
+        `changed beyond ±${m.lod_m} m: <b>${fmt(st.changed_pct, 1)} %</b> of the area<br>` +
+        `lowered <b style="color:#ff8a8a">${fmt(st.loss_m3)} m³</b> · raised <b style="color:#9d8dff">${fmt(st.gain_m3)} m³</b><br>` +
+        `net <b>${signed(st.net_m3)} m³</b> ± ${fmt(st.uncertainty_m3)} m³</div>` +
+        `<div class="note">± is conservative (noise ${m.stable_nmad_m} m over the changed area). The two models differ by ` +
+        `${m.stable_median_m} m on stable ground; over this area that alone is ${signed(st.bias_m3)} m³ (not corrected).</div>`,
+        done, extent, { label: "GeoJSON", file: () => [`oeschinensee_change_${stamp()}.geojson`, JSON.stringify({
+          type: "FeatureCollection",
+          features: [{ type: "Feature",
+            geometry: { type: "Polygon", coordinates: [[...lonlat, lonlat[0]].map(([x, y]) => [+x.toFixed(7), +y.toFixed(7)])] },
+            properties: {
+              tool: "measure change", from_year: m.years[0], to_year: m.years[1],
+              ...Object.fromEntries(Object.entries(st).map(([k, v]) => [k, +v.toFixed(k.endsWith("_m") ? 2 : 1)])),
+              lod_m: m.lod_m, stable_nmad_m: m.stable_nmad_m, stable_median_m: m.stable_median_m,
+              method: "swissALTI3D 2 m difference (to - from); |dh| < lod_m ignored in volumes; uncertainty = nmad x changed area; offset not corrected",
+              source: "swissALTI3D © swisstopo", created: new Date().toISOString(),
+            } }],
+        }, null, 2), "application/geo+json"] });
+    }
+
+    async function finishProfile(pts) {
+      // sample ~300 points along the line (geodesic per segment), then the most detailed terrain heights
+      const segs = pts.slice(1).map((p, i) => new Cesium.EllipsoidGeodesic(
+        Cesium.Cartographic.fromCartesian(pts[i]), Cesium.Cartographic.fromCartesian(p)));
+      const total = segs.reduce((s, g) => s + g.surfaceDistance, 0);
+      const step = Math.max(total / 300, 2);  // the DEM is 0.5–2 m: finer is pointless
+      const cartos = [], dist = [];
+      let along = 0;
+      segs.forEach((g, i) => {
+        const n = Math.max(1, Math.round(g.surfaceDistance / step));
+        for (let k = i ? 1 : 0; k <= n; k++) {
+          cartos.push(g.interpolateUsingSurfaceDistance((k / n) * g.surfaceDistance, new Cesium.Cartographic()));
+          dist.push(along + (k / n) * g.surfaceDistance);
+        }
+        along += g.surfaceDistance;
+      });
+      const mid = Cesium.Cartesian3.fromRadians(cartos[cartos.length >> 1].longitude, cartos[cartos.length >> 1].latitude,
+        globe.getHeight(cartos[cartos.length >> 1]) ?? 0);
+      openDialog(mid, "Elevation profile", "sampling terrain…", () => clearResult(),
+        cartos.map((c) => Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, globe.getHeight(c) ?? 0)));
+      await Promise.all([changeReady, terrainReady.then((tp) => Cesium.sampleTerrainMostDetailed(tp, cartos))]);
+      const now = cartos.map((c) => c.height - GEOID_N);  // ≈ m a.s.l.
+      const before = cartos.map((c, i) => now[i] - changeAt(Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude)));
+      const st = profileStats(dist, now);
+      const dh = now.map((z, i) => z - before[i]).filter(Number.isFinite);
+      const hasBefore = dh.length > 0;
+      openDialog(mid, "Elevation profile",
+        profileSvg(dist, now, hasBefore ? before : now.map(() => NaN)) +
+        `<div class="rows">` +
+        `length <b>${fmt(st.length_m / 1000, 2)} km</b> · ${fmt(st.min_m)}–${fmt(st.max_m)} m a.s.l.<br>` +
+        `climb <b>${fmt(st.ascent_m)} m</b> · descent <b>${fmt(st.descent_m)} m</b> · steepest <b>${fmt(st.max_slope_deg)}°</b><br>` +
+        (hasBefore ? `change along line: <b>${signed(Math.min(...dh), 1)}</b> to <b>${signed(Math.max(...dh), 1)} m</b>` : "") +
+        `</div><div class="note"><span style="color:#39d5ff">—</span> ${hasBefore ? changeMeta.years[1] : "terrain"}` +
+        (hasBefore ? ` · <span style="color:#ff8a8a">- -</span> ${changeMeta.years[0]}` : "") +
+        ` · heights ≈ a.s.l. (ellipsoid − ${GEOID_N} m)</div>`,
+        () => clearResult(), cartos.map((c) => Cesium.Cartesian3.fromRadians(c.longitude, c.latitude, c.height)),
+        [{ label: "CSV", file: () => {
+          const y = changeMeta?.years ?? ["before", "now"];
+          const cell = (v, d) => (Number.isFinite(v) ? v.toFixed(d) : "");
+          const rows = cartos.map((c, i) => [cell(dist[i], 1), cell(Cesium.Math.toDegrees(c.longitude), 7),
+            cell(Cesium.Math.toDegrees(c.latitude), 7), cell(now[i], 2), cell(before[i], 2), cell(now[i] - before[i], 2)].join(","));
+          const header = `distance_m,lon,lat,elev_${y[1]}_m_asl_approx,elev_${y[0]}_m_asl_approx,dh_m`;
+          return [`oeschinensee_profile_${stamp()}.csv`, [header, ...rows].join("\n") + "\n", "text/csv"];
+        } },
+        { label: "GPX", file: () => {
+          // GPS track along the sampled line; <ele> is ≈ metres above sea level (ellipsoid − GEOID_N)
+          const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+          const pts = cartos.map((c, i) =>
+            `      <trkpt lat="${Cesium.Math.toDegrees(c.latitude).toFixed(7)}" lon="${Cesium.Math.toDegrees(c.longitude).toFixed(7)}">` +
+            `<ele>${now[i].toFixed(1)}</ele></trkpt>`).join("\n");
+          const name = esc(`Oeschinensee profile ${fmt(st.length_m / 1000, 2)} km`);
+          const gpx = `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Oeschinensee digital twin" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><name>${name}</name><desc>Elevations from swissALTI3D (© swisstopo), approx. m a.s.l.</desc>` +
+            `<time>${new Date().toISOString()}</time></metadata>
+  <trk><name>${name}</name>
+    <trkseg>
+${pts}
+    </trkseg>
+  </trk>
+</gpx>
+`;
+          return [`oeschinensee_profile_${stamp()}.gpx`, gpx, "application/gpx+xml"];
+        } }]);
+    }
+
+    // --- Menu ---------------------------------------------------------------------------------------------
+    $("menuBtn").addEventListener("click", (e) => {
+      const open = e.currentTarget.getAttribute("aria-expanded") !== "true";
+      e.currentTarget.setAttribute("aria-expanded", open);
+      $("menu").hidden = !open;
+    });
+    $("showCloud").addEventListener("change", (e) => {
+      if (cloud) cloud.show = e.target.checked;
+      else if (e.target.checked) loadCloud();
+    });
+    $("showContours").addEventListener("change", (e) => { contours.uniforms.strength = e.target.checked ? 1 : 0; });
+    $("showGrid").addEventListener("change", (e) => gridLines.forEach((l) => (l.show = e.target.checked)));
+    $("showChange").addEventListener("change", async (e) => {
+      await changeReady;
+      if (change) change.show = e.target.checked;
+      $("legend").hidden = !e.target.checked;
+    });
+
+    // --- Clicks: drawing vertices; item labels; height readout ---------------------------------------------
+    // Viewer's default double-click flies to and tracks the entity under the cursor: off, we use it to finish drawing
+    viewer.cesiumWidget.screenSpaceEventHandler.removeInputAction(Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    const clicks = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+    clicks.setInputAction(() => {
+      // a double-click also fired two single clicks on the same spot: drop the duplicate vertex, then finish
+      if (!tool) return;
+      tool.pts.pop();
+      finishTool();
+    }, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+    clicks.setInputAction((click) => {
+      if (tool) {
+        const p = globe.pick(viewer.camera.getPickRay(click.position), scene);
+        if (p) tool.pts.push(p);
+        $("pick").textContent = `${tool.pts.length} point${tool.pts.length === 1 ? "" : "s"} · double-click or Enter to finish · Esc cancels`;
+        return;
+      }
+      const picked = scene.pick(click.position);
+      const entity = picked?.id instanceof Cesium.Entity ? (picked.id.labelTarget ?? picked.id) : undefined;
+      if (entity?.label) {
+        const on = !entity.label.show.getValue();
+        entity.label.show = on;
+        entity.point.color = on ? SELECT : HOLO.withAlpha(0.9);
+        // orange glow on the ground around the selected item
+        if (on) {
+          entity.halo = viewer.entities.add({
+            position: entity.position.getValue(Cesium.JulianDate.now()),
+            ellipse: { semiMajorAxis: 70, semiMinorAxis: 70, material: SELECT.withAlpha(0.35),
+                       classificationType: Cesium.ClassificationType.TERRAIN },
+          });
+        } else if (entity.halo) {
+          viewer.entities.remove(entity.halo);
+          entity.halo = undefined;
+        }
+        $("pick").textContent = `${entity.label.text.getValue()} · ${entity.properties.kind.getValue()}`;
+        return;
+      }
+      const p = scene.pickPosition(click.position);
+      if (!p) return;
+      const c = Cesium.Cartographic.fromCartesian(p);
+      const terrain = globe.getHeight(c);
+      const onCloud = cloud && picked?.primitive === cloud;
+      const dh = change?.show || resultLayer ? changeAt(Cesium.Math.toDegrees(c.longitude), Cesium.Math.toDegrees(c.latitude)) : NaN;
+      $("pick").textContent =
+        `${onCloud ? "LiDAR" : "terrain"} ≈ ${fmt(c.height - GEOID_N, 1)} m a.s.l.` +
+        (onCloud && terrain !== undefined ? ` · terrain ${fmt(terrain - GEOID_N, 1)} m` : "") +
+        (Number.isFinite(dh) ? ` · Δh ${signed(dh, 2)} m` : "");
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+  </script>
+</body>
+</html>

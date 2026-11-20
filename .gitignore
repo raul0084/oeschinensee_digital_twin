@@ -1,0 +1,10 @@
+data/
+__pycache__/
+*.part
+.DS_Store
+*.log
+.env
+notebooks/
+viewer/config.js
+.claude/
+CLAUDE.md
