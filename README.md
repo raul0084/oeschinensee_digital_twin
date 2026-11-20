@@ -1,6 +1,6 @@
 # Oeschinensee digital twin 🏔️
 
-![Oeschinensee](viewer/data/oeschinensee.png)
+![Oeschinensee](oeschinensee.png)
 
 I turned Oeschinensee, an alpine lake above Kandersteg in Switzerland, into a glowing 3D "hologram" map in the browser, built entirely from free swisstopo data.
 
